@@ -18,19 +18,23 @@ import (
 	pagespeedonline "google.golang.org/api/pagespeedonline/v2"
 )
 
+//ResultRow 結果のrow
 type ResultRow []string
+
+//Results 結果のrowを格納する配列
 type Results []ResultRow
 
+//AnalyzeParam analyze関数へ渡す引数
 type AnalyzeParam struct {
 	target, strategy string
 }
 
 const (
-	urlsFilePath   = "./urls.csv"
-	resultFilePath = "./result.csv"
-	strategyMOBILE = "mobile"
-	strategyPC     = "desktop"
-	workerNum      = 10
+	urlsFilePath   = "./urls.csv"   //Analyzeの対象となるURLリストファイル
+	resultFilePath = "./result.csv" //結果csvのファイルパス
+	strategyMOBILE = "mobile"       //Analyze対象のデバイス(mobile)
+	strategyPC     = "desktop"      //Analyze対象のデバイス(PC)
+	workerNum      = 5              //ワーカーの数
 )
 
 var wg sync.WaitGroup
@@ -42,6 +46,7 @@ func main() {
 	cxt, cancel := context.WithCancel(context.Background())
 	queue := make(chan AnalyzeParam)
 
+	//ワーカーの作成
 	for i := 0; i < workerNum; i++ {
 		wg.Add(1)
 		go func(ctx context.Context, queue chan AnalyzeParam) {
@@ -62,6 +67,7 @@ func main() {
 	reader := csv.NewReader(file)
 	reader.LazyQuotes = true
 
+	//キューにジョブを積む
 	for {
 		record, err := reader.Read()
 
@@ -87,6 +93,7 @@ func replaceToFormat(format string, key string, value string) string {
 	return strings.Replace(format, "{{"+key+"}}", value, 1)
 }
 
+//Analyzeを行う
 func analyze(param AnalyzeParam) Results {
 
 	var results Results
@@ -96,7 +103,8 @@ func analyze(param AnalyzeParam) Results {
 		panic(err)
 	}
 
-	r, err := pso.Pagespeedapi.Runpagespeed(param.target).Locale("ja_jp").Strategy(param.strategy).Do()
+	r, err := pso.Pagespeedapi.Runpagespeed(param.target).
+		Locale("ja_jp").Strategy(param.strategy).Do()
 	if err != nil {
 		panic(err)
 	}
@@ -132,6 +140,7 @@ func analyze(param AnalyzeParam) Results {
 	return results
 }
 
+//CSVファイルに書き込む
 func writeCsv(data Results) {
 	file, err := os.OpenFile(resultFilePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
 
