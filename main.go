@@ -1,80 +1,147 @@
 package main
 
 import (
+	"encoding/csv"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/net/context"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/transform"
 
 	pagespeedonline "google.golang.org/api/pagespeedonline/v2"
-
-	"fmt"
-	"time"
-	"os"
-	"encoding/csv"
-	"io"
 )
 
-func main() {
-	//https://developers.google.com/speed/docs/insights/v2/reference/pagespeedapi/runpagespeed
-	//読み込みファイル準備
-	urlFile, _:= os.Open("./urls.csv")
-	defer urlFile.Close()
-	reader := csv.NewReader(urlFile)
-	for {
-		record, err := reader.Read() // 1行読み出す
+type ResultRow []string
+type Results []ResultRow
 
-		if err == io.EOF || len(record) == 0 {
+type AnalyzeParam struct {
+	target, strategy string
+}
+
+const (
+	urlsFilePath   = "./urls.csv"
+	resultFilePath = "./result.csv"
+	strategyMOBILE = "mobile"
+	strategyPC     = "desktop"
+	workerNum      = 10
+)
+
+var wg sync.WaitGroup
+
+func main() {
+
+	fmt.Println("--- start ---")
+
+	cxt, cancel := context.WithCancel(context.Background())
+	queue := make(chan AnalyzeParam)
+
+	for i := 0; i < workerNum; i++ {
+		wg.Add(1)
+		go func(ctx context.Context, queue chan AnalyzeParam) {
+			for {
+				select {
+				case <-ctx.Done():
+					wg.Done()
+					return
+				case param := <-queue:
+					writeCsv(analyze(param))
+				}
+			}
+		}(cxt, queue)
+	}
+
+	file, _ := os.Open(urlsFilePath)
+	defer file.Close()
+	reader := csv.NewReader(file)
+	reader.LazyQuotes = true
+
+	for {
+		record, err := reader.Read()
+
+		if err == io.EOF {
 			break
 		} else if err != nil {
 			fmt.Println(err)
+		} else if record != nil {
+			fmt.Println(record[0])
+			param := AnalyzeParam{target: record[0], strategy: strategyPC}
+			queue <- param
+			param.strategy = strategyMOBILE
+			queue <- param
 		}
-
-		fmt.Println(record[0])
-
-		//for i, v := range record {
-		//	fmt.Println()
-		//}
-		//var new_record []string
-		//for i, v := range record {
-		//	if i > 0 {
-		//		new_record = append(new_record, fmt.Sprint(i) + ":" + v)
-		//	}
-		//}
-		//writer.Write(new_record) // 1行書き出す
-		//      log.Printf("%#v", record[0] + "," + record[1])
 	}
-//panic("------------------")
 
-	target := "http://techblog-sokuhou.com"
+	cancel()
+	wg.Wait()
+	fmt.Println("--- end ---")
+}
 
+func replaceToFormat(format string, key string, value string) string {
+	return strings.Replace(format, "{{"+key+"}}", value, 1)
+}
+
+func analyze(param AnalyzeParam) Results {
+
+	var results Results
 	c := &http.Client{Timeout: time.Duration(60) * time.Second}
-	pso, _ := pagespeedonline.New(c)
-	r, _ := pso.Pagespeedapi.Runpagespeed(target).Locale("ja_jp").Strategy("desktop").Do()
+	pso, err := pagespeedonline.New(c)
+	if err != nil {
+		panic(err)
+	}
 
-	fmt.Println("---->Tartget:", r.Id)
-	fmt.Println("---->Title:", r.Title)
-	fmt.Println("---->RuleGroup-SPEED:", r.RuleGroups["SPEED"])
+	r, err := pso.Pagespeedapi.Runpagespeed(param.target).Locale("ja_jp").Strategy(param.strategy).Do()
+	if err != nil {
+		panic(err)
+	}
 
-	fmt.Println("--------------------------------------------------------")
 	for k, v := range r.FormattedResults.RuleResults {
 		if k == "OptimizeImages" {
-			fmt.Println("---->", v.LocalizedRuleName)
-			fmt.Println("---->", v.Summary.Format)
-			for _, uv := range v.UrlBlocks {
-				fmt.Println("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-				for _, urlsValue := range uv.Urls {
-					fmt.Println(urlsValue.Result.Format)
-					fmt.Println("+++++++++++++++++++")
+			for _, u := range v.UrlBlocks {
+				for _, urlsValue := range u.Urls {
+					message := urlsValue.Result.Format
+					var source string
 					for _, arg := range urlsValue.Result.Args {
-						fmt.Println("**********")
-						//fmt.Println(arg.Key)
-						//fmt.Println(arg.Rect)
-						//fmt.Println(arg.SecondaryRects)
-						fmt.Println(arg.Type)
-						fmt.Println(arg.Value)
-						fmt.Println("**********")
+						if arg.Key == "URL" {
+							source = arg.Value
+						}
+						message = replaceToFormat(message, arg.Key, arg.Value)
 					}
+					results = append(results,
+						ResultRow{time.Now().String(),
+							param.strategy,
+							r.Id,
+							r.Title,
+							strconv.FormatInt(r.RuleGroups["SPEED"].Score, 10),
+							v.LocalizedRuleName,
+							v.Summary.Format,
+							message,
+							source,
+						})
 				}
+
 			}
 		}
 	}
-	fmt.Println("--------------------------------------------------------")
+	return results
+}
+
+func writeCsv(data Results) {
+	file, err := os.OpenFile(resultFilePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
+
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	w := csv.NewWriter(transform.NewWriter(file, japanese.ShiftJIS.NewEncoder()))
+	for _, row := range data {
+		w.Write(row)
+	}
+	w.Flush()
 }
