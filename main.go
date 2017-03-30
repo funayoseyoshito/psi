@@ -50,6 +50,7 @@ func main() {
 	for i := 0; i < workerNum; i++ {
 		wg.Add(1)
 		go func(ctx context.Context, queue chan AnalyzeParam) {
+			//ジョブがなくなるまで実行する
 			for {
 				select {
 				case <-ctx.Done():
@@ -62,6 +63,7 @@ func main() {
 		}(cxt, queue)
 	}
 
+	//URLファイルの読み込み
 	file, _ := os.Open(urlsFilePath)
 	defer file.Close()
 	reader := csv.NewReader(file)
